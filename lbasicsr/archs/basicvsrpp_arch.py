@@ -10,6 +10,7 @@ from lbasicsr.archs.spynet_arch import SpyNet
 from lbasicsr.metrics.runtime import VSR_runtime_test
 from lbasicsr.ops.dcn import ModulatedDeformConvPack
 from lbasicsr.utils.registry import ARCH_REGISTRY
+from lbasicsr.archs.swinir_arch import SwinIR
 
 
 @ARCH_REGISTRY.register()
@@ -41,14 +42,15 @@ class BasicVSRPlusPlus(nn.Module):
             Default: 100.
     """
 
-    def __init__(self,
-                 mid_channels=64,
-                 num_blocks=7,
-                 max_residue_magnitude=10,
-                 is_low_res_input=True,
-                 spynet_path=None,
-                 cpu_cache_length=100):
-
+    def __init__(
+        self,
+        mid_channels=64,
+        num_blocks=7,
+        max_residue_magnitude=10,
+        is_low_res_input=True,
+        spynet_path=None,
+        cpu_cache_length=100,
+    ):
         super().__init__()
         self.mid_channels = mid_channels
         self.is_low_res_input = is_low_res_input
@@ -56,15 +58,21 @@ class BasicVSRPlusPlus(nn.Module):
 
         # optical flow
         self.spynet = SpyNet(spynet_path)
+        self.swinir = torch.load(
+            "experiments/pretrained_models/SwinIR/002_lightweightSR_DIV2K_s64w8_SwinIR-S_x4.pth"
+        )
 
         # feature extraction module
         if is_low_res_input:
             self.feat_extract = ConvResidualBlocks(3, mid_channels, 5)
         else:
             self.feat_extract = nn.Sequential(
-                nn.Conv2d(3, mid_channels, 3, 2, 1), nn.LeakyReLU(negative_slope=0.1, inplace=True),
-                nn.Conv2d(mid_channels, mid_channels, 3, 2, 1), nn.LeakyReLU(negative_slope=0.1, inplace=True),
-                ConvResidualBlocks(mid_channels, mid_channels, 5))
+                nn.Conv2d(3, mid_channels, 3, 2, 1),
+                nn.LeakyReLU(negative_slope=0.1, inplace=True),
+                nn.Conv2d(mid_channels, mid_channels, 3, 2, 1),
+                nn.LeakyReLU(negative_slope=0.1, inplace=True),
+                ConvResidualBlocks(mid_channels, mid_channels, 5),
+            )
 
         # propagation branches
         self.deform_align = nn.ModuleDict()
@@ -78,8 +86,11 @@ class BasicVSRPlusPlus(nn.Module):
                     3,
                     padding=1,
                     deformable_groups=16,
-                    max_residue_magnitude=max_residue_magnitude)
-            self.backbone[module] = ConvResidualBlocks((2 + i) * mid_channels, mid_channels, num_blocks)
+                    max_residue_magnitude=max_residue_magnitude,
+                )
+            self.backbone[module] = ConvResidualBlocks(
+                (2 + i) * mid_channels, mid_channels, num_blocks
+            )
 
         # upsampling module
         self.reconstruction = ConvResidualBlocks(5 * mid_channels, mid_channels, 5)
@@ -103,9 +114,11 @@ class BasicVSRPlusPlus(nn.Module):
             self.is_with_alignment = True
         else:
             self.is_with_alignment = False
-            warnings.warn('Deformable alignment module is not added. '
-                          'Probably your CUDA is not configured correctly. DCN can only '
-                          'be used with CUDA enabled. Alignment is skipped now.')
+            warnings.warn(
+                'Deformable alignment module is not added. '
+                'Probably your CUDA is not configured correctly. DCN can only '
+                'be used with CUDA enabled. Alignment is skipped now.'
+            )
 
     def check_if_mirror_extended(self, lqs):
         """Check whether the input is a mirror-extended sequence.
@@ -218,7 +231,11 @@ class BasicVSRPlusPlus(nn.Module):
                 feat_prop = self.deform_align[module_name](feat_prop, cond, flow_n1, flow_n2)
 
             # concatenate and residual blocks
-            feat = [feat_current] + [feats[k][idx] for k in feats if k not in ['spatial', module_name]] + [feat_prop]
+            feat = (
+                [feat_current]
+                + [feats[k][idx] for k in feats if k not in ['spatial', module_name]]
+                + [feat_prop]
+            )
             if self.cpu_cache:
                 feat = [f.cuda() for f in feat]
 
@@ -298,7 +315,8 @@ class BasicVSRPlusPlus(nn.Module):
             lqs_downsample = lqs.clone()
         else:
             lqs_downsample = F.interpolate(
-                lqs.view(-1, c, h, w), scale_factor=0.25, mode='bicubic').view(n, t, c, h // 4, w // 4)
+                lqs.view(-1, c, h, w), scale_factor=0.25, mode='bicubic'
+            ).view(n, t, c, h // 4, w // 4)
 
         # check whether the input is an extended sequence
         self.check_if_mirror_extended(lqs)
@@ -319,8 +337,8 @@ class BasicVSRPlusPlus(nn.Module):
 
         # compute optical flow using the low-res inputs
         assert lqs_downsample.size(3) >= 64 and lqs_downsample.size(4) >= 64, (
-            'The height and width of low-res inputs must be at least 64, '
-            f'but got {h} and {w}.')
+            'The height and width of low-res inputs must be at least 64, ' f'but got {h} and {w}.'
+        )
         flows_forward, flows_backward = self.compute_flow(lqs_downsample)
 
         # feature propgation
@@ -381,7 +399,6 @@ class SecondOrderDeformableAlignment(ModulatedDeformConvPack):
         self.init_offset()
 
     def init_offset(self):
-
         def _constant_init(module, val, bias=0):
             if hasattr(module, 'weight') and module.weight is not None:
                 nn.init.constant_(module.weight, val)
@@ -405,53 +422,59 @@ class SecondOrderDeformableAlignment(ModulatedDeformConvPack):
         # mask
         mask = torch.sigmoid(mask)
 
-        return torchvision.ops.deform_conv2d(x, offset, self.weight, self.bias, self.stride, self.padding,
-                                             self.dilation, mask)
+        return torchvision.ops.deform_conv2d(
+            x, offset, self.weight, self.bias, self.stride, self.padding, self.dilation, mask
+        )
 
 
 if __name__ == '__main__':
     from torch.profiler import profile, record_function, ProfilerActivity
     from fvcore.nn import flop_count_table, FlopCountAnalysis, ActivationCountAnalysis
-    
+
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     # device = 'cpu'
-    
+
     scale = (4, 4)
     model = BasicVSRPlusPlus(
         mid_channels=64,
         num_blocks=7,
         is_low_res_input=True,
-        spynet_path='experiments/pretrained_models/flownet/spynet_sintel_final-3d2a1287.pth'
+        spynet_path='experiments/pretrained_models/flownet/spynet_sintel_final-3d2a1287.pth',
     ).to(device)
-    
+
     input = torch.rand(1, 7, 3, 180, 320).to(device)
-    
+
     # ------ torch profile -------------------------
-    with profile(
-        activities=[
-            ProfilerActivity.CPU,
-            ProfilerActivity.CUDA],
-        record_shapes=True,
-        profile_memory=True,
-    ) as prof:
-        with record_function("model_inference"):
-            out = model(input)
-    
-    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-    
+    # with profile(
+    #     activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    #     record_shapes=True,
+    #     profile_memory=True,
+    # ) as prof:
+    #     with record_function("model_inference"):
+    #         out = model(input)
+
+    # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+
     # ------ Runtime ------------------------------
-    VSR_runtime_test(model, input, scale)
-    
+    # VSR_runtime_test(model, input, scale)
+
     # ------ Parameter ----------------------------
     print(
-        "Model have {:.3f}M parameters in total".format(sum(x.numel() for x in model.parameters()) / 1000000.0))
-    
+        "Model have {:.3f}M parameters in total".format(
+            sum(x.numel() for x in model.parameters()) / 1000000.0
+        )
+    )
+
     # ------ FLOPs --------------------------------
-    with torch.no_grad():
-        print('Input:', input.shape)
-        print(flop_count_table(FlopCountAnalysis(model, input), activations=ActivationCountAnalysis(model, input)))
-        out = model(input)
-        print('Output:', out.shape)
+    # with torch.no_grad():
+    #     print('Input:', input.shape)
+    #     print(
+    #         flop_count_table(
+    #             FlopCountAnalysis(model, input), activations=ActivationCountAnalysis(model, input)
+    #         )
+    #     )
+    #     out = model(input)
+    #     print('Output:', out.shape)
 
 
 """
